@@ -1,0 +1,28 @@
+version: "3.9"
+
+# Staging environment — connects to RESTORED staging DB on host
+# Used only during backup validation tests, torn down after.
+
+services:
+  staging-backend:
+    image: stakpak-backend:latest
+    container_name: stakpak_staging_backend
+    restart: "no"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      NODE_ENV:    staging
+      PORT:        5001
+      DB_HOST:     host.docker.internal
+      DB_PORT:     3306
+      DB_USER:     ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME:     ${STAGING_DB_NAME}
+    ports:
+      - "5001:5001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5001/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s

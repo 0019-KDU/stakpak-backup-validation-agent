@@ -1,0 +1,11 @@
+# Stakpak Agent LLM Profile Configuration
+# Docs: https://stakpak.gitbook.io/docs
+
+[profiles.backup-validator]
+provider = "anthropic"
+model    = "anthropic/claude-sonnet-4-6"
+
+# Bring your own Anthropic key
+[profiles.backup-validator.providers.anthropic]
+type    = "anthropic"
+api_key = "$ANTHROPIC_API_KEY"

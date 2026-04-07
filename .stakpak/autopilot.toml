@@ -1,0 +1,21 @@
+# Stakpak Autopilot Schedule Configuration
+# Docs: https://stakpak.gitbook.io/docs
+
+# Run backup validation every day at 2:00 AM
+[schedules.daily-backup-validation]
+cron    = "0 2 * * *"
+prompt  = """
+Run the full database backup validation pipeline for stakpak_agent_db.
+Follow the backup-validation rulebook step by step.
+Report the final result clearly showing PASS or FAIL for each check.
+"""
+profile = "backup-validator"
+
+# Run a quick integrity-only check every 6 hours
+[schedules.quick-integrity-check]
+cron    = "0 */6 * * *"
+prompt  = """
+Run only the integrity check on the latest backup file in /opt/stakpak/backups/.
+Verify the SHA256 checksum matches. Report PASS or FAIL.
+"""
+profile = "backup-validator"

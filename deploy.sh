@@ -11,9 +11,6 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-echo "▶ Pulling latest code..."
-git pull origin main
-
 echo "▶ Building images..."
 docker compose --env-file .env build --no-cache
 
