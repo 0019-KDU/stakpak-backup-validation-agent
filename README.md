@@ -82,6 +82,166 @@ Every day at **2:00 AM** (and a quick integrity check every 6 hours), the Stakpa
 
 ---
 
+## Autopilot Core Components
+
+Stakpak Autopilot runs as a **systemd service** and spawns 4 background processes:
+
+```
+stakpak-autopilot (PID 3412886)
+├─ scheduler   → Watches cron jobs, fires them on schedule
+├─ server      → HTTP API (localhost:4096) for webhooks + status
+├─ gateway     → Slack integration layer (approval + notifications)
+└─ warden      → Sandbox container isolation (optional)
+```
+
+```bash
+# Check service status
+systemctl status stakpak-autopilot
+ps aux | grep stakpak-autopilot
+
+# Stream component logs
+stakpak autopilot logs -n 50 -c scheduler   # Cron events
+stakpak autopilot logs -n 50 -c gateway     # Slack events
+stakpak autopilot logs -n 50 -c server      # HTTP events
+```
+
+**Persistent storage:**
+
+| File | Purpose |
+|------|---------|
+| `~/.stakpak/autopilot/autopilot.db` | Run history, sessions, schedule state |
+| `~/.stakpak/autopilot/gateway.db` | Approval context (TTL-bound) |
+| `~/.stakpak/autopilot/logs/` | Per-component log files |
+
+### Scheduler — How Cron Works
+
+```
+a) READ CONFIG        → Parse [[schedules]] from autopilot.toml
+b) PARSE CRON         → "0 2 * * *" = every day at 2 AM
+                        ┌─────────────────────┐
+                        │ 0 2 * * *           │
+                        │ 0 = minute 0        │
+                        │ 2 = hour 2          │
+                        │ * = any day/month   │
+                        └─────────────────────┘
+c) WATCH LOOP         → Checks every 60 seconds: "Is it time?"
+d) FIRE               → If cron matches AND no run in progress → create Session
+e) DATABASE TRACKING  → Writes to autopilot.db:
+                        ├─ id, schedule_id, status (running/completed/failed)
+                        ├─ started_at, finished_at
+                        └─ session_id, error (if failed)
+```
+
+### Session Creation — Spinning Up the Agent
+
+When a schedule fires, a new **Session** is created:
+
+```
+├─ Generate session_id (UUID)
+├─ Load LLM profile from config.toml (e.g., "default" → Claude)
+├─ Set permissions based on approval_mode + warden rules:
+│  ✅ run_command  (bash scripts)
+│  ✅ view         (read files)
+│  ✅ mysql CLI    (database access)
+│  ✅ docker       (containers)
+│  ❌ delete_data  (forbidden)
+│  ❌ aws_delete   (forbidden)
+└─ Load into agent context:
+   ├─ Prompt (from [[schedules]] in autopilot.toml)
+   ├─ Rulebook (backup-validation.md)
+   ├─ File system access (/root/.stakpak/)
+   ├─ Environment variables (DB_USER, DB_PASSWORD, etc.)
+   └─ Available tools (run_command, view, create, str_replace)
+```
+
+### Agent Execution — Tool Call Flow
+
+```
+┌─────────────────────────────────┐
+│ Agent generates tool call       │
+│ e.g. run_command("bash ...")    │
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│ Check approval_mode             │
+│ "allow_all" → auto-approve ✓    │
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│ Check Warden Guardrails         │
+│ Is this operation allowed?      │
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│ Execute Tool Call               │
+│ (bash script, file read, etc.)  │
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│ Return result to Agent          │
+│ (stdout, stderr, exit code)     │
+└──────────────┬──────────────────┘
+               ▼
+┌─────────────────────────────────┐
+│ Agent reasons on result         │
+│ → decides next tool call        │
+│ → repeat until task complete    │
+└─────────────────────────────────┘
+```
+
+### Warden — Sandbox Isolation
+
+Warden optionally runs the agent inside a Docker container with strict guardrails.
+
+| Mode | Behaviour |
+|------|-----------|
+| `ephemeral` | New container per session — safest, slower |
+| `persistent` | One container per day — faster |
+| `sandbox = false` | Runs directly on host — fastest |
+
+**Guardrails (even with `allow_all`):**
+
+```
+Filesystem:  ✅ /root/.stakpak/ (read)   ❌ /etc/passwd
+Network:     ✅ localhost, DB            ❌ random internet
+Process:     ✅ bash scripts, docker     ❌ kill system processes
+Secrets:     ✅ read from .env           ❌ log to stdout
+```
+
+**Container example (when sandbox = true):**
+```bash
+docker run --rm \
+  --name stakpak-sandbox-{session_id} \
+  --memory 512m --cpus 1 \
+  -v /root/.stakpak:/agent/.stakpak:ro \
+  -v /tmp:/tmp:rw \
+  ghcr.io/stakpak/agent:v0.3.73
+```
+
+### Approval Gateway — Slack Bridge
+
+The gateway runs as an HTTP server on `localhost:4096` and bridges Slack ↔ Autopilot.
+
+**With `approval_mode = "pause_on_tool"` (manual):**
+```
+Agent calls tool → Gateway intercepts
+→ Posts "Allow/Reject?" to Slack
+→ User clicks Allow
+→ Gateway unblocks agent → tool executes
+```
+
+**With `approval_mode = "allow_all"` (our setup):**
+```
+Agent calls tool → Gateway auto-approves
+→ Tool executes immediately
+→ No Slack delays, no 4-hour TTL issues
+→ Fully autonomous
+```
+
+> Why `allow_all`? With `pause_on_tool`, if the user clicks Allow after the 4-hour `delivery_context_ttl_hours` expires, the approval is lost and the run stays stuck forever. `allow_all` + Warden guardrails gives autonomous operation with safety.
+
+---
+
 ## How It Works — Full Workflow
 
 ### Scenario: Daily Backup Validation at 2 AM
@@ -149,6 +309,53 @@ Every day at **2:00 AM** (and a quick integrity check every 6 hours), the Stakpa
 12. SESSION ENDS
     └─ Run marked "completed" in autopilot history
     └─ Next run scheduled for tomorrow at 2 AM
+```
+
+---
+
+## Complete Workflow — Timestamped
+
+```
+2026-04-08 01:59:59  Scheduler sleeping (checking every 60 seconds)
+
+2026-04-08 02:00:00  ⏰ CRON FIRES: "0 2 * * *" matches
+                     ├─ Previous run? → No (completed yesterday)
+                     ├─ Create Session UUID
+                     ├─ Load rulebook + tools + context
+                     └─ Post to Slack: "Starting validation..."
+
+2026-04-08 02:00:05  Agent reads rulebook
+                     ├─ stakpak__view("/root/.stakpak/rulebooks/backup-validation.md")
+                     └─ Understands 7-step procedure, success criteria
+
+2026-04-08 02:00:10  Agent calls: bash /root/.stakpak/scripts/run_validation.sh
+                     ├─ Gateway: approval_mode = "allow_all" ✓
+                     ├─ Warden: bash allowed? YES ✓
+                     └─ Script starts executing
+
+02:00:10 → 02:01:45  Steps 1–7 execute sequentially:
+                     ├─ Step 1: mysqldump → gzip → SHA256
+                     ├─ Step 2: Verify checksum + gzip integrity
+                     ├─ Step 3: Drop staging → create fresh → restore
+                     ├─ Step 4: Compare table list + row counts
+                     ├─ Step 5: NULL, ENUM, PK, timestamp checks
+                     ├─ Step 6: Docker up → 7 API tests → docker down
+                     └─ Step 7: Generate report → save log file
+
+2026-04-08 02:01:50  Agent receives script output
+                     ├─ Reads /root/.stakpak/logs/validation-*.log
+                     ├─ Parses: [PASS] × 6 steps → OVERALL: PASS
+                     └─ Formats Slack report
+
+2026-04-08 02:01:55  Gateway sends report to Slack
+                     ├─ Authenticates with app_token + bot_token
+                     ├─ Calls Slack API: chat.postMessage
+                     └─ Message appears in #stakpak-agent-database
+
+2026-04-08 02:02:00  Session ends
+                     ├─ Status = "completed" in autopilot.db
+                     ├─ Agent memory cleared
+                     └─ Scheduler resumes watching (next: 2 AM tomorrow)
 ```
 
 ---
@@ -268,6 +475,49 @@ stakpak-backup-validation-agent/
 │ Exits:   0 = PASS, 1 = FAIL                                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+## Rulebook Deep Dive
+
+The Rulebook is a **Markdown SOP** (Standard Operating Procedure) that guides the agent.
+
+**File structure:**
+```markdown
+---
+uri: stakpak://stakpak-agent/backup-validation
+description: Full MySQL backup validation pipeline
+version: "1.0"
+tags: [backup, validation, mysql]
+---
+
+## Step 1 — Create Backup
+Run: bash /root/.stakpak/scripts/01_create_backup.sh
+Expected: File created, size > 0, SHA256 generated
+On Fail: Report FAIL and stop
+
+## Step 2 — Integrity Check
+...
+```
+
+**How the agent uses it:**
+```
+1. Receives prompt → "Run the full backup validation pipeline"
+2. Searches: find /root/.stakpak/rulebooks -name "*backup*"
+3. Loads: backup-validation.md (full procedure)
+4. Follows each step: read criteria → execute → check output → pass/fail
+5. If any step fails → stops + reports FAIL to Slack
+```
+
+**Rulebook vs Scripts:**
+
+| Rulebook (Markdown) | Scripts (Bash) |
+|---------------------|----------------|
+| Human-readable SOP | Actual execution code |
+| Documents the "why" | Executes the "what" |
+| Guides agent decisions | Does the work |
+| Defines success/failure criteria | Reports pass/fail |
+| References multiple scripts | Focused on one task |
+
+---
 
 ### Step 6 API Tests (Staging App)
 
@@ -514,6 +764,66 @@ approval_mode = "allow_all" → no manual Allow click needed
 
 ---
 
+## Data Flow
+
+### Config → Autopilot
+```
+/root/.stakpak/autopilot.toml
+        ↓
+Autopilot reads + parses TOML
+        ↓
+Registered in ~/.stakpak/autopilot/autopilot.db
+(schedules, run history, session state)
+```
+
+### Environment → Scripts
+```
+/root/.stakpak/.env
+  (DB_USER, DB_PASSWORD, DB_NAME, STAGING_DB_NAME, BACKUP_DIR)
+        ↓
+Each script: source /root/.stakpak/.env
+        ↓
+mysql -u $DB_USER -p$DB_PASSWORD $DB_NAME ...
+```
+
+### Agent → Tools → Results
+```
+Agent: "Run bash backup.sh"
+        ↓
+Tool call: run_command("bash /root/.stakpak/scripts/run_validation.sh")
+        ↓ (approval_mode = "allow_all")
+Bash script executes → captures stdout + stderr
+        ↓
+Result returned: { exit_code: 0, output: "..." }
+        ↓
+Agent receives → continues reasoning → next call
+```
+
+---
+
+## Slack Messages — What Gets Sent
+
+**1. Schedule fired (start)**
+```
+Stakpak Autopilot
+Schedule: daily-backup-validation fired at 2026-04-08 02:00:00 UTC
+Session: 1ccb75fe-a042-4311-a3b1-33f7dbb853f0
+Starting: Full database backup validation for stakpak_agent_db
+```
+
+**2. Tool approval request (only if `approval_mode = "pause_on_tool"`)**
+```
+:wrench: Tool approval required
+run_command
+bash /root/.stakpak/scripts/run_validation.sh
+[Allow]  [Reject]
+Context TTL: 4 hours
+```
+
+**3. Final report (always sent)**
+
+---
+
 ## Slack Reports
 
 Results are automatically posted to `#stakpak-agent-database`:
@@ -620,6 +930,51 @@ stakpak autopilot channel test
 
 ---
 
+## Component Responsibilities
+
+| Component | Responsibility | Contribution |
+|-----------|---------------|--------------|
+| **Autopilot** | Orchestration + lifecycle | Runs 24/7, fires tasks at right time |
+| **Scheduler** | Cron-based timing | Knows when to start each task |
+| **Agent (Claude)** | Reasoning + decisions | Reads rulebook, calls tools, reports |
+| **Rulebook** | Knowledge base | Tells agent what to do + success criteria |
+| **Warden** | Security + isolation | Prevents dangerous operations |
+| **Gateway** | Slack bridge + approvals | Posts updates, handles Allow/Reject |
+| **Scripts** | Execution | Does the actual backup/validate/test work |
+| **MySQL** | Data layer | Backup source + staging restore target |
+| **Docker** | Staging env | Runs isolated test backend on port 5001 |
+
+## Dependency Chain
+
+```
+AUTOPILOT needs:
+├─ autopilot.toml (config)
+├─ All below components working
+└─ Systemd (to run as service)
+
+AGENT needs:
+├─ Rulebook (procedure manual)
+├─ Tools (run_command, view, etc.)
+└─ /root/.stakpak/scripts/ (executables)
+
+SCRIPTS need:
+├─ MySQL CLI (backup/restore)
+├─ Docker (staging app test)
+├─ /root/.stakpak/.env (credentials)
+└─ /root/.stakpak/backups/ (write access)
+
+GATEWAY needs:
+├─ SLACK_BOT_TOKEN (xoxb-...)
+├─ SLACK_APP_TOKEN (xapp-...)
+└─ HTTP server on localhost:4096
+
+SCHEDULER needs:
+├─ Cron expressions in [[schedules]]
+└─ autopilot.db (to track run state)
+```
+
+---
+
 ## System Status Summary
 
 | Component | Purpose | Technology | Notes |
@@ -631,6 +986,36 @@ stakpak autopilot channel test
 | **Docker** | Run staging app + tests | Docker Compose | Staging on port 5001 |
 | **Slack** | Send reports, receive approvals | Slack Socket Mode API | Auto-approve mode |
 | **File Storage** | Store backups & logs | Local filesystem | `/root/.stakpak/` |
+
+### Live System (Reference)
+
+```
+Service: stakpak-autopilot
+├─ Memory: ~587 MB    CPU: ~0.2%    Uptime: continuous
+
+Active Schedules:
+├─ daily-backup-validation   (0 2 * * *)    → runs every day at 2 AM
+└─ quick-integrity-check     (0 */6 * * *)  → runs every 6 hours
+
+Gateway:
+├─ Approval Mode: allow_all (fully autonomous)
+├─ Listen: 127.0.0.1:4096
+└─ Context TTL: 4 hours
+
+Databases (SQLite):
+├─ autopilot.db → run history, session state
+└─ gateway.db   → approval context (TTL-bound)
+
+Recent Runs (example):
+├─ Run #14: daily-backup-validation → PASSED ✅
+├─ Run #13: daily-backup-validation → FAILED ❌
+└─ Run #12: daily-backup-validation → FAILED ❌
+
+Backup Storage:
+├─ /root/.stakpak/backups/backup_*.sql.gz
+├─ /root/.stakpak/backups/backup_*.sha256
+└─ /root/.stakpak/backups/latest.txt
+```
 
 ---
 
