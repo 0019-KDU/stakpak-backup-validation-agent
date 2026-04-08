@@ -1,21 +1,41 @@
-# Stakpak Autopilot Schedule Configuration
-# Docs: https://stakpak.gitbook.io/docs
+[channels.slack]
+app_token = "$SLACK_APP_TOKEN"
+bot_token = "$SLACK_BOT_TOKEN"
+profile   = "default"
 
-# Run backup validation every day at 2:00 AM
-[schedules.daily-backup-validation]
+[gateway]
+approval_allowlist       = []
+approval_mode            = "allow_all"
+delivery_context_ttl_hours = 4
+prune_after_hours        = 168
+store                    = "/root/.stakpak/autopilot/gateway.db"
+title_template           = "{channel} / {peer}"
+
+[notifications]
+channel     = "slack"
+chat_id     = "stakpak-agent-database"
+gateway_url = "http://127.0.0.1:4096"
+
+[routing]
+bindings  = []
+dm_scope  = "per_channel_peer"
+
+[[schedules]]
+name    = "daily-backup-validation"
 cron    = "0 2 * * *"
-prompt  = """
-Run the full database backup validation pipeline for stakpak_agent_db.
-Follow the backup-validation rulebook step by step.
-Report the final result clearly showing PASS or FAIL for each check.
-"""
-profile = "backup-validator"
+channel = "slack"
+profile = "default"
+sandbox = false
+prompt  = "Run the full database backup validation pipeline by executing: bash /root/.stakpak/scripts/run_validation.sh. Report the final result clearly showing PASS or FAIL for each check."
 
-# Run a quick integrity-only check every 6 hours
-[schedules.quick-integrity-check]
+[[schedules]]
+name    = "quick-integrity-check"
 cron    = "0 */6 * * *"
-prompt  = """
-Run only the integrity check on the latest backup file in /opt/stakpak/backups/.
-Verify the SHA256 checksum matches. Report PASS or FAIL.
-"""
-profile = "backup-validator"
+channel = "slack"
+profile = "default"
+sandbox = false
+prompt  = "Run only the integrity check on the latest backup file in /root/.stakpak/backups/. Read /root/.stakpak/backups/latest.txt to find the latest backup filename, then verify its SHA256 checksum matches the .sha256 file. Report PASS or FAIL."
+
+[server]
+listen      = "127.0.0.1:4096"
+sandbox_mode = "ephemeral"

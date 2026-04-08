@@ -1,11 +1,60 @@
-# Stakpak Agent LLM Profile Configuration
-# Docs: https://stakpak.gitbook.io/docs
+[profiles.readonly]
+provider = "local"
+model = "claude-opus-4-6"
 
-[profiles.backup-validator]
-provider = "anthropic"
-model    = "anthropic/claude-sonnet-4-6"
+[profiles.readonly.warden]
+enabled = true
+volumes = [
+    "~/.stakpak/config.toml:/home/agent/.stakpak/config.toml:ro",
+    "~/.stakpak/auth.toml:/home/agent/.stakpak/auth.toml:ro",
+    "~/.stakpak/data/local.db:/home/agent/.stakpak/data/local.db",
+    "~/.agent-board/data.db:/home/agent/.agent-board/data.db",
+    "./:/agent:ro",
+    "./.stakpak:/agent/.stakpak",
+    "~/.aws/config:/home/agent/.aws/config:ro",
+    "~/.aws/credentials:/home/agent/.aws/credentials:ro",
+    "~/.aws/sso:/home/agent/.aws/sso",
+    "~/.aws/cli:/home/agent/.aws/cli",
+    "~/.config/gcloud/active_config:/home/agent/.config/gcloud/active_config:ro",
+    "~/.config/gcloud/configurations:/home/agent/.config/gcloud/configurations:ro",
+    "~/.config/gcloud/application_default_credentials.json:/home/agent/.config/gcloud/application_default_credentials.json:ro",
+    "~/.config/gcloud/credentials.db:/home/agent/.config/gcloud/credentials.db:ro",
+    "~/.config/gcloud/access_tokens.db:/home/agent/.config/gcloud/access_tokens.db:ro",
+    "~/.config/gcloud/logs:/home/agent/.config/gcloud/logs",
+    "~/.config/gcloud/cache:/home/agent/.config/gcloud/cache",
+    "~/.azure/config:/home/agent/.azure/config:ro",
+    "~/.azure/clouds.config:/home/agent/.azure/clouds.config:ro",
+    "~/.azure/azureProfile.json:/home/agent/.azure/azureProfile.json:ro",
+    "~/.azure/msal_token_cache.json:/home/agent/.azure/msal_token_cache.json",
+    "~/.azure/msal_http_cache.bin:/home/agent/.azure/msal_http_cache.bin",
+    "~/.azure/logs:/home/agent/.azure/logs",
+    "~/.digitalocean:/home/agent/.digitalocean:ro",
+    "~/.kube:/home/agent/.kube:ro",
+    "~/.ssh:/home/agent/.ssh:ro",
+    "stakpak-aqua-cache:/home/agent/.local/share/aquaproj-aqua",
+]
 
-# Bring your own Anthropic key
-[profiles.backup-validator.providers.anthropic]
-type    = "anthropic"
-api_key = "$ANTHROPIC_API_KEY"
+[profiles.readonly.providers.anthropic]
+type = "anthropic"
+
+[profiles.readonly.providers.anthropic.auth]
+type = "api"
+key  = "****************************************************"
+
+[profiles.default]
+provider = "local"
+model    = "claude-opus-4-6"
+
+[profiles.default.providers.anthropic]
+type = "anthropic"
+
+[profiles.default.providers.anthropic.auth]
+type = "api"
+key  = "****************************************************"
+
+[settings]
+machine_name           = "spiritual-sleet-7064"
+auto_append_gitignore  = true
+anonymous_id           = "4ce2dcb9-eefe-4a8c-b32a-e197406d177e"
+collect_telemetry      = true
+editor                 = "nano"
